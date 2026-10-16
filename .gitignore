@@ -1,0 +1,44 @@
+# 依赖与构建产物
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 运行时缓存：下载的视频、GIF、上传文件、保存设置、日志
+.cache/
+*.log
+
+# 本机配置（示例见 .env.example）
+.env
+.env.*
+!.env.example
+
+# 下载或导出的媒体与大文件（项目自带测试片 public/assets/videos/demo.mp4 除外）
+*.mp4
+*.mov
+*.m4v
+*.webm
+*.mkv
+*.avi
+*.gif
+!public/assets/videos/demo.mp4
+*.zip
+*.dmg
+
+# 个人 AI 交接与内部记录
+AGENTS.md
+CLAUDE.md
+docs/
+输出/
+
+# 未采用的 Logo 候选
+public/assets/images/clip-studio-logo-butterfly-*.png
+public/assets/images/clip-studio-logo.png
+
+# 系统与编辑器
+.DS_Store
+.idea/
+.vscode/
+.claude/
