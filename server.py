@@ -1,9 +1,10 @@
 """Local-only video workbench. No browser cookies or account access."""
-import json, math, os, re, secrets, shutil, subprocess, threading, time, uuid
+import copy, json, math, os, re, secrets, shutil, subprocess, threading, time, uuid
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, unquote
 import yt_dlp
+from link_sources import SourceError, normalize_video_url, bilibili_source, source_error_message
 from export_storage import ExportStore, SaveError, native_file_picker, VIDEO_EXTENSIONS
 
 ROOT = Path(__file__).resolve().parent
@@ -63,16 +64,17 @@ def options():
             'cachedir':False,'restrictfilenames':True,'ffmpeg_location':str(Path(FFMPEG).parent)}
 
 def parse_source(value):
-    if value == 'demo':
+    try:
+        url = normalize_video_url(value)
+    except SourceError as error:
+        raise UserError(str(error)) from None
+    if url == 'demo':
         path = ROOT / 'public/assets/videos/demo.mp4'
         metadata = probe(path)
         formats = [{'id':'original','ext':'mp4','width':metadata['width'],'height':metadata['height'],
                     'size':path.stat().st_size,'approximate':False,'label':'MP4 · 原始视频','audio':True}]
         title, info = '流动的色彩 · 本地测试片', {'demo':True,'path':path}
     else:
-        match = re.search(r'https?://[^\s<>]+',value)
-        if not match: raise UserError('请粘贴完整的 http 或 https 视频链接。')
-        url = match.group().rstrip('，。；）)')
         parsed = urlsplit(url)
         if not parsed.hostname or parsed.username or parsed.password: raise UserError('视频网址格式不正确。')
         import socket, ipaddress
@@ -83,7 +85,12 @@ def parse_source(value):
             if any(not ipaddress.ip_address(a[4][0]).is_global and not (proxy_active and ipaddress.ip_address(a[4][0]).version==4 and ipaddress.ip_address(a[4][0]) in fake_dns) for a in addresses):
                 raise UserError('请输入公开网站的视频链接。')
         except socket.gaierror: raise UserError('无法连接这个网站，请检查链接和网络。')
-        with yt_dlp.YoutubeDL(options()) as ydl: info = ydl.extract_info(url, download=False)
+        try:
+            info = bilibili_source(url)
+            if info is None:
+                with yt_dlp.YoutubeDL(options()) as ydl: info = ydl.extract_info(url, download=False)
+        except Exception as error:
+            raise UserError(source_error_message(error, url)) from None
         if not info or info.get('_type') in ('playlist','multi_video') or info.get('is_live'):
             raise UserError('请提供单条非直播视频链接。')
         raw = [f for f in info.get('formats', [info]) if f.get('vcodec') != 'none' and (f.get('vcodec') or f.get('ext') in ('mp4','webm','mkv','mov','flv','avi','m4v')) and f.get('url') and not f.get('has_drm')]
@@ -113,7 +120,7 @@ def parse_source(value):
         info['_selections'] = selections
         info['_source_url'] = url
     sid = uuid.uuid4().hex
-    source = {'id':sid,'title':title,'formats':formats,**metadata,'created':time.time()}
+    source = {'id':sid,'title':title,'formats':formats,'sourceUrl':url,**metadata,'created':time.time()}
     with LOCK: SOURCES[sid] = {**source,'info':info,'files':{},'file_lock':threading.Lock()}
     return source
 
@@ -180,7 +187,10 @@ def download_source(source, fid, job):
                 job.update(message='正在获取视频文件…',progress=min(70, int(data.get('downloaded_bytes',0)/total*70)) if total else 5)
         opts = {**options(),'format':source['info']['_selections'][fid], 'outtmpl':str(dest/'video.%(ext)s'),
                 'merge_output_format':fmt['ext'],'progress_hooks':[progress]}
-        with yt_dlp.YoutubeDL(opts) as ydl: ydl.download([source['info']['_source_url']])
+        # Reuse the resolved snapshot: a second webpage extraction can be rejected
+        # even while its already-issued media URLs are valid. Each worker gets a copy.
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.process_ie_result(copy.deepcopy(source['info']), download=True)
         files = [p for p in dest.glob('video.*') if p.suffix not in ('.part','.ytdl')]
         if not files: raise UserError('未能完成下载，请重试。')
         path = max(files,key=lambda p:p.stat().st_size)
@@ -235,7 +245,24 @@ def execute_job(jid, data):
                 speed = float(data.get('speed',1))
                 quality = data.get('quality','medium')
                 validate_gif_settings(start,duration,limit,speed,quality)
-            path = download_source(source,fid,job)
+            if kind in ('preview','gif'):
+                # Some sites advertise a combined stream but reject its media URL.
+                # Preview/GIF may use another public stream; video keeps the exact user's selection.
+                alternatives = sorted(source['formats'], key=lambda f: (
+                    f['id'] not in source['files'], not bool(f.get('audio')),
+                    abs((f.get('height') or 480)-480)))
+                candidates = [fid] + [f['id'] for f in alternatives if f['id'] != fid]
+                for attempt, candidate in enumerate(candidates[:3]):
+                    try:
+                        path = download_source(source,candidate,job)
+                        fid = candidate
+                        break
+                    except Exception:
+                        if attempt == min(3,len(candidates))-1:
+                            raise
+                        job.update(message='正在尝试其他可播放格式…')
+            else:
+                path = download_source(source,fid,job)
             result = {}
             if kind in ('preview','gif'):
                 actual = probe(path)
@@ -257,8 +284,8 @@ def execute_job(jid, data):
                        filename=('动图_' if kind=='gif' else '视频_')+jid[:8]+path.suffix,size=path.stat().st_size,**{k:v for k,v in result.items() if k!='size'})
         except Exception as error:
             msg = str(error)
-            if not isinstance(error,UserError):
-                msg = '获取失败：'+re.sub(r'\x1b\[[0-9;]*m','',msg)[-600:]+'。可尝试视频直链；需要登录的平台本版暂不处理。'
+            if not isinstance(error,(UserError, SourceError)):
+                msg = source_error_message(error, source.get('info', {}).get('_source_url', '') if source else '')
             job.update(status='error',message=msg)
 
 def new_job(data):

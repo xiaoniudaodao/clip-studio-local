@@ -35,7 +35,7 @@ function App(){
  async function waitJob(id,onProgress,valid=()=>true){for(;;){if(!valid())return null;await new Promise(r=>setTimeout(r,700));const r=await fetch(`/api/jobs/${id}`);const d=await r.json();if(!r.ok)throw Error(d.error||'任务读取失败');if(!valid())return null;onProgress?.(d);if(d.status==='error')throw Error(d.message);if(d.status==='done')return d;}}
  async function resolve(value){
   const g=++generation.current;++previewGeneration.current;setLoading(true);setSource(null);setPreview(null);setResult(null);setError('');setSaveSuccess(null);setPreviewError('');setJob(null);setClipPlay(false);
-  try{const s=await api('/api/resolve',{url:value});if(g!==generation.current)return;setSource(s);setFormat(downloadOptions(s.formats)[0].id);setFilename('');const initial=0;setStart(initial);setCursor(initial);setDuration(Math.min(5,s.duration||5));setPreset(5);setSpeed(1);loadPreview(s);}
+  try{const s=await api('/api/resolve',{url:value});if(g!==generation.current)return;setSource(s);setUrl(s.sourceUrl||value);setFormat(downloadOptions(s.formats)[0].id);setFilename('');const initial=0;setStart(initial);setCursor(initial);setDuration(Math.min(5,s.duration||5));setPreset(5);setSpeed(1);loadPreview(s);}
   catch(e){setError(e.message)}finally{if(g===generation.current)setLoading(false)}
  }
  async function importDrop(file){
